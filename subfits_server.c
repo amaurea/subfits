@@ -59,7 +59,7 @@ int main(int argc, char ** argv) {
 	}
 	if(!ofname) ofname = daemon ? "subfits_server.log" : "/dev/stderr";
 	if(daemon) daemonize();
-	log_fd = open(ofname, O_WRONLY|O_CREAT|O_TRUNC, 0666);
+	log_fd = open(ofname, O_WRONLY|O_CREAT|O_APPEND, 0666);
 	// redirect stderr and stdout to this file. This is a bit hacky, but I'm not sure
 	// how best to make the program behave sensibly both running normally and as a server.
 	// I don't think this server program needs to distinguish between stdout and stderr anyway,

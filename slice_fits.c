@@ -19,7 +19,6 @@
 #define NAXIS_MAX 10
 #define MAX_IOVEC 1024
 
-
 typedef struct HeaderInfo {
 	ssize_t bitpix_pos; ssize_t bitpix;
 	ssize_t naxes_pos;            ssize_t naxes;
@@ -27,6 +26,7 @@ typedef struct HeaderInfo {
 	ssize_t naxis_pos[NAXIS_MAX]; ssize_t naxis[NAXIS_MAX];
 	ssize_t crpix_pos[NAXIS_MAX]; double  crpix[NAXIS_MAX];
 	ssize_t cdelt_pos[NAXIS_MAX]; double  cdelt[NAXIS_MAX];
+	ssize_t crval_pos[NAXIS_MAX]; double  crval[NAXIS_MAX];
 } HeaderInfo;
 
 enum { SLICE_RANGE, SLICE_SINGLE };
@@ -46,7 +46,7 @@ int parse_header(char * header, HeaderInfo * info) {
 	// Initialize to -1, so we can see if we have read them later
 	info->naxes_pos = info->wcsaxes_pos = info->bitpix_pos = -1;
 	for(int i = 0; i < NAXIS_MAX; i++)
-		info->naxis_pos[i] = info->crpix_pos[i] = info->cdelt_pos[i] = -1;
+		info->naxis_pos[i] = info->crpix_pos[i] = info->cdelt_pos[i] = info->crval_pos[i] = -1;
 	char nbuf[8+1];
 	for(int ri = 0; ri < HEADER_NROW; ri++) {
 		char * name = header + ri*HEADER_NCOL;
@@ -73,13 +73,26 @@ int parse_header(char * header, HeaderInfo * info) {
 			info->cdelt_pos[ax] = doff;
 			info->cdelt[ax]     = atof(data);
 		}
+		else if(!strncmp(name, "CRVAL", 5)) {
+			int ax = atoi(name+5)-1;
+			if(ax < 0 || ax >= NAXIS_MAX) return false;
+			info->crval_pos[ax] = doff;
+			info->crval[ax]     = atof(data);
+		}
 	}
 	int ok = info->bitpix_pos != -1 && info->naxes_pos != -1;
 	if(ok) for(int i = 0; i < info->naxes; i++)
 		ok &= info->naxis_pos[i] != -1;
 	if(ok) for(int i = 0; i < info->wcsaxes; i++)
-		ok &= info->crpix_pos[i] != -1 && info->cdelt_pos[i] != -1;
+		ok &= info->crpix_pos[i] != -1 && info->cdelt_pos[i] != -1 && info->crval_pos[i] != 0;
 	return ok;
+}
+
+void fix_wcs(HeaderInfo * info) {
+	// Move crval to make the whole image valid [CYL]
+	double xoff = info->naxis[0]/2+1 - info->crpix[0];
+	info->crpix[0] += xoff;
+	info->crval[0] += xoff*info->cdelt[0];
 }
 
 void update_header(char * header, HeaderInfo * info) {
@@ -93,6 +106,7 @@ void update_header(char * header, HeaderInfo * info) {
 	for(int i = 0; i < info->wcsaxes; i++) {
 		snprintf(buf, 21, "%20.8f",  info->crpix[i]); memcpy(header+info->crpix_pos[i], buf, 20);
 		snprintf(buf, 21, "%20.15f", info->cdelt[i]); memcpy(header+info->cdelt_pos[i], buf, 20);
+		snprintf(buf, 21, "%20.15f", info->crval[i]); memcpy(header+info->crval_pos[i], buf, 20);
 	}
 }
 
@@ -150,8 +164,9 @@ int parse_sel(char * sel, HeaderInfo * info, char * header, Slice * slice) {
 	if(!strncmp(name1, "pbox", name2-name1)) {
 		// No conversion necessary
 	} else if(!strncmp(name1, "box", name2-name1)) {
-		// Convert the degrees do pixels for the pixel axes. First build our wcs object from
-		// the header.
+		// Convert the degrees do pixels for the pixel axes. This partially assumes
+		// cylindircal projection [CYL]
+		// First build our wcs object from the header.
 		struct wcsprm * wcs;
 		int nreject, nwcs, status;
 		status = wcspih(header, HEADER_NROW, 0, 0, &nreject, &nwcs, &wcs);
@@ -182,6 +197,7 @@ int parse_sel(char * sel, HeaderInfo * info, char * header, Slice * slice) {
 	for(ssize_t i = 0; i < slice->naxes; i++)
 		if(slice->mode[i] == SLICE_SINGLE)
 			slice->i2[i] = slice->i1[i]+1;
+	// This assumes cylindircal projection [CYL]
 	if(fix_order) {
 		int wrapx = (int)(fabs(360/info->cdelt[0])+0.5);
 		if(slice->i2[0] < slice->i1[0]) slice->i2[0] += wrapx;
@@ -245,7 +261,7 @@ int slice_fits(int ifd, int ofd, char * sel, size_t * osize) {
 	Slice slice;
 	if(!parse_sel(sel, &info, header, &slice)) { code = FSLICE_EPARSE; goto cleanup; }
 
-	// Get our sky wrap info. This assumes a cylindrical projection
+	// Get our sky wrap info. This assumes a cylindrical projection [CYL]
 	ssize_t wrapy = 0, wrapx = (ssize_t)(fabs(360/info.cdelt[0])+0.5);
 	// We don't allow selections that are bigger than the whole sky. We could,
 	// but it's tedious to implement and confuses other fits code
@@ -283,6 +299,7 @@ int slice_fits(int ifd, int ofd, char * sel, size_t * osize) {
 		if(slice.mode[i] == SLICE_SINGLE) { oinfo.naxes--; j--; }
 		else { oinfo.naxis[j] = slice.i2[i]-slice.i1[i]; }
 	}
+	fix_wcs(&oinfo);
 	update_header(header, &oinfo);
 	char oheader[HEADER_NROW*HEADER_NCOL];
 	prune_header(header, oheader, oinfo.naxes);

@@ -37,7 +37,7 @@ typedef struct Slice {
 	ssize_t naxes;
 } Slice;
 
-ssize_t idiv(ssize_t a, ssize_t b) { return a < 0 ? -((-a)/b) : a/b; }
+ssize_t idiv(ssize_t a, ssize_t b) { return a < 0 ? -((-a-1)/b)-1 : a/b; }
 ssize_t imod(ssize_t a, ssize_t b) { ssize_t c = a%b; if(c < 0) c += b; return c; }
 ssize_t imax(ssize_t a, ssize_t b) { return a > b ? a : b; }
 ssize_t imin(ssize_t a, ssize_t b) { return a < b ? a : b; }
@@ -142,7 +142,6 @@ int parse_sel(char * sel, HeaderInfo * info, char * header, Slice * slice) {
 	// Then parse. The slice is in the opposite order of our final slice object, so
 	// we make a temporary array to read it into. We make it double so that we can
 	// handle both box and pbox with the same parser
-	int fix_order = false;
 	double tmp_i1[NAXIS_MAX], tmp_i2[NAXIS_MAX];
 	ssize_t tmp_mode[NAXIS_MAX], tmp_naxes = 0;
 	char * c1 = sel, * c2;
@@ -182,11 +181,12 @@ int parse_sel(char * sel, HeaderInfo * info, char * header, Slice * slice) {
 		int stat[2];
 		status = wcss2p(wcs, 2, 9, world[0], phi, theta, imgcoord[0], pixcoord[0], stat);
 		if(status) { wcsvfree(&nwcs, &wcs); return false; }
-		tmp_i1[tmp_naxes-1] = floor(pixcoord[0][0]+0.5); tmp_i1[tmp_naxes-2] = floor(pixcoord[0][1]+0.5);
-		tmp_i2[tmp_naxes-1] = floor(pixcoord[1][0]+0.5); tmp_i2[tmp_naxes-2] = floor(pixcoord[1][1]+0.5);
+		// Read out the declinations
+		tmp_i1[tmp_naxes-2] = floor(pixcoord[0][1]+0.5); tmp_i2[tmp_naxes-2] = floor(pixcoord[1][1]+0.5);
+		// But override the RAs to avoid loosing sky wrap information. This assumes cylindrical proj [CYL]
+		tmp_i1[tmp_naxes-1] = floor((tmp_i1[tmp_naxes-1]-info->crval[0])/info->cdelt[0]+info->crpix[0]+0.5);
+		tmp_i2[tmp_naxes-1] = floor((tmp_i2[tmp_naxes-1]-info->crval[0])/info->cdelt[0]+info->crpix[0]+0.5);
 		wcsvfree(&nwcs, &wcs);
-		// fits coordinate ambiguity might have led to wrapping, which we must undo
-		fix_order = true;
 	}
 	// Finally copy into the output slice
 	for(ssize_t i = 0; i < tmp_naxes; i++) {
@@ -197,11 +197,6 @@ int parse_sel(char * sel, HeaderInfo * info, char * header, Slice * slice) {
 	for(ssize_t i = 0; i < slice->naxes; i++)
 		if(slice->mode[i] == SLICE_SINGLE)
 			slice->i2[i] = slice->i1[i]+1;
-	// This assumes cylindircal projection [CYL]
-	if(fix_order) {
-		int wrapx = (int)(fabs(360/info->cdelt[0])+0.5);
-		if(slice->i2[0] < slice->i1[0]) slice->i2[0] += wrapx;
-	}
 	return true;
 }
 
@@ -264,9 +259,10 @@ int slice_fits(int ifd, int ofd, char * sel, size_t * osize) {
 	// Get our sky wrap info. This assumes a cylindrical projection [CYL]
 	ssize_t wrapy = 0, wrapx = (ssize_t)(fabs(360/info.cdelt[0])+0.5);
 	// We don't allow selections that are bigger than the whole sky. We could,
-	// but it's tedious to implement and confuses other fits code
-	if(wrapy && slice.y2-slice.y1 > wrapy) { code = FSLICE_EVALS; goto cleanup; }
-	if(wrapx && slice.x2-slice.x1 > wrapx) { code = FSLICE_EVALS; goto cleanup; }
+	// but it's tedious to implement and confuses other fits code. If the seleciton
+	// is bigger, we simply cap it to the maximum size
+	if(wrapy && slice.y2-slice.y1 > wrapy) slice.y2 = slice.y1 + wrapy; // { code = FSLICE_EVALS; goto cleanup; }
+	if(wrapx && slice.x2-slice.x1 > wrapx) slice.x2 = slice.x1 + wrapx; // { code = FSLICE_EVALS; goto cleanup; }
 	// Slices must be in the right order, and that none of the pre-dimensions are
 	// out of bound
 	for(ssize_t i = 0; i < slice.naxes; i++)

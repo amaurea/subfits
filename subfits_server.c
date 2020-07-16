@@ -139,7 +139,7 @@ void send_header(int client_sd, int log_fd, char * addr_str, char * url, int cod
 // accepts connections, handles them, and then returns to accepting again.
 void * server_thread(void * arg) {
 	pthread_t thread_id = pthread_self();
-	int server_sd = *(int*)arg, client_sd = -1, fd, log_fd = STDOUT_FILENO;
+	int server_sd = *(int*)arg, client_sd = -1, fd = -1, log_fd = STDOUT_FILENO;
 	struct sockaddr_in6 client_addr;
 	int addrlen = sizeof(client_addr);
 	char addr_str[INET6_ADDRSTRLEN];
@@ -205,6 +205,7 @@ void * server_thread(void * arg) {
 cleanup:
 		if(client_sd >= 0) close(client_sd);
 		if(path) { free(path); path = 0; }
+		if(fd >= 0) close(fd);
 	}
 	return 0;
 }

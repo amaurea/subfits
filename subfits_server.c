@@ -162,16 +162,15 @@ void * server_thread(void * arg) {
 		// Parse the request. This has the form method url prot, key: value pairs, payload.
 		// But in our case we only care about GET, so the method url prot part should be all we
 		// need to care about
-		method = strtok_r(read_buf, " \t\r\n", &saveptr);
-		url    = strtok_r(NULL,     " \t",     &saveptr);
-		prot   = strtok_r(NULL,     " \t\r\n", &saveptr);
+		method = strtok_r(read_buf, " \t\r\n", &saveptr); if(!method) method = "<null>";
+		url    = strtok_r(NULL,     " \t",     &saveptr); if(!url)    url    = "<null>";
+		prot   = strtok_r(NULL,     " \t\r\n", &saveptr); if(!prot)   prot   = "<null>";
 		strncpy(orig_url, url, sizeof(orig_url));
 		// Split the url into the path and the query string
 		if((query = strchr(url, '?'))) *query++ = 0;
 		else query = url-1;
 		//printf("method: %s, url: %s, query: %s, prot: %s\n", method, url, query, prot);
 		if(strcmp(method, "GET")) {
-			snprintf(work, sizeof(work), "Only GET is supported, but got '%s'\r\n", method);
 			send_header(client_sd, log_fd, addr_str, orig_url, HTTP_405, "\r\nOnly GET is supported, but got '%s'", method);
 			goto cleanup;
 		}

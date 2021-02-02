@@ -16,10 +16,12 @@
 #define false 0
 #define HEADER_NROW 36
 #define HEADER_NCOL 80
+#define HEADER_MAXBLOCKS 10
 #define NAXIS_MAX 10
 #define MAX_IOVEC 1024
 
 typedef struct HeaderInfo {
+	int nblock;
 	ssize_t bitpix_pos; ssize_t bitpix;
 	ssize_t naxes_pos;            ssize_t naxes;
 	ssize_t wcsaxes_pos;          ssize_t wcsaxes;
@@ -44,17 +46,19 @@ ssize_t imin(ssize_t a, ssize_t b) { return a < b ? a : b; }
 
 int parse_header(char * header, HeaderInfo * info) {
 	// Initialize to -1, so we can see if we have read them later
-	info->naxes_pos = info->wcsaxes_pos = info->bitpix_pos = -1;
+	info->naxes_pos = info->wcsaxes_pos = info->bitpix_pos = info->naxes = info->wcsaxes = -1;
 	for(int i = 0; i < NAXIS_MAX; i++)
 		info->naxis_pos[i] = info->crpix_pos[i] = info->cdelt_pos[i] = info->crval_pos[i] = -1;
 	char nbuf[8+1];
-	for(int ri = 0; ri < HEADER_NROW; ri++) {
+	int ri, ok;
+	for(ri = 0; ri < HEADER_MAXBLOCKS*HEADER_NROW; ri++) {
 		char * name = header + ri*HEADER_NCOL;
 		char * data = name   + 10;
 		ssize_t doff = data - header;
 		if     (!strncmp(name, "BITPIX  ", 8)) { info->bitpix_pos = doff; info->bitpix = atoi(data); }
 		else if(!strncmp(name, "NAXIS   ", 8)) { info->naxes_pos  = doff; info->naxes  = imin(atoi(data), NAXIS_MAX); }
 		else if(!strncmp(name, "WCSAXES ", 8)) { info->wcsaxes_pos= doff; info->wcsaxes= imin(atoi(data), NAXIS_MAX); }
+		else if(!strncmp(name, "END     ", 8)) { ri++; goto finish; }
 		else if(!strncmp(name, "NAXIS", 5)) {
 			int ax = atoi(name+5)-1;
 			if(ax < 0 || ax >= NAXIS_MAX) return false;
@@ -80,7 +84,9 @@ int parse_header(char * header, HeaderInfo * info) {
 			info->crval[ax]     = atof(data);
 		}
 	}
-	int ok = info->bitpix_pos != -1 && info->naxes_pos != -1;
+finish:
+	info->nblock = (ri+HEADER_NROW-1)/HEADER_NROW;
+	ok = info->bitpix_pos != -1 && info->naxes_pos != -1;
 	if(ok) for(int i = 0; i < info->naxes; i++)
 		ok &= info->naxis_pos[i] != -1;
 	if(ok) for(int i = 0; i < info->wcsaxes; i++)
@@ -99,28 +105,37 @@ void update_header(char * header, HeaderInfo * info) {
 	char buf[21];
 	snprintf(buf, 21, "%20d", info->bitpix);  memcpy(header+info->bitpix_pos, buf, 20);
 	snprintf(buf, 21, "%20d", info->naxes);   memcpy(header+info->naxes_pos,  buf, 20);
-	snprintf(buf, 21, "%20d", info->wcsaxes); memcpy(header+info->wcsaxes_pos,buf, 20);
+	if(info->wcsaxes >= 0) {
+		snprintf(buf, 21, "%20d", info->wcsaxes); memcpy(header+info->wcsaxes_pos,buf, 20);
+	}
 	for(int i = 0; i < info->naxes; i++) {
 		snprintf(buf, 21, "%20d",    info->naxis[i]); memcpy(header+info->naxis_pos[i], buf, 20);
 	}
-	for(int i = 0; i < info->wcsaxes; i++) {
-		snprintf(buf, 21, "%20.8f",  info->crpix[i]); memcpy(header+info->crpix_pos[i], buf, 20);
-		snprintf(buf, 21, "%20.15f", info->cdelt[i]); memcpy(header+info->cdelt_pos[i], buf, 20);
-		snprintf(buf, 21, "%20.15f", info->crval[i]); memcpy(header+info->crval_pos[i], buf, 20);
+	for(int i = 0; i < info->naxes; i++) {
+		if(info->crpix_pos[i] >= 0) { snprintf(buf, 21, "%20.8f",  info->crpix[i]); memcpy(header+info->crpix_pos[i], buf, 20); }
+		if(info->cdelt_pos[i] >= 0) { snprintf(buf, 21, "%20.15f", info->cdelt[i]); memcpy(header+info->cdelt_pos[i], buf, 20); }
+		if(info->crval_pos[i] >= 0) { snprintf(buf, 21, "%20.15f", info->crval[i]); memcpy(header+info->crval_pos[i], buf, 20); }
 	}
 }
 
-void prune_header(char * iheader, char * oheader, int naxes) {
+int prune_header(char * iheader, char * oheader, int nblock, int naxes) {
 	// Copy iheader to oheader, but remove NAXISX entries that
 	// are higher than naxes.
-	int naxisX;
+	int naxisX, i, j;
 	memset(oheader, ' ', HEADER_NROW*HEADER_NCOL);
-	for(int i = 0, j = 0; i < HEADER_NROW; i++, j++) {
+	for(i = 0, j = 0; i < HEADER_NROW*nblock; i++, j++) {
 		char * irow = iheader + i*HEADER_NCOL;
 		char * orow = oheader + j*HEADER_NCOL;
 		if(sscanf(irow, "NAXIS%d ", &naxisX) == 1 && naxisX > naxes) j--;
-		else memcpy(orow, irow, HEADER_NCOL);
+		else {
+			memcpy(orow, irow, HEADER_NCOL);
+			if(!strncmp(irow, "END     ", 8)) { j++; break; }
+		}
 	}
+	// At this point j is the number of rows processed. Use this to compute
+	// the new number of blocks
+	nblock = (j+HEADER_NROW-1)/HEADER_NROW;
+	return nblock;
 }
 
 int parse_sel(char * sel, HeaderInfo * info, char * header, Slice * slice) {
@@ -245,10 +260,10 @@ int slice_fits(int ifd, int ofd, char * sel, size_t * osize) {
 	int code = FSLICE_UNKNOWN;
 	size_t flen = lseek(ifd, 0, SEEK_END); lseek(ifd, 0, SEEK_SET);
 	data = mmap(NULL, flen, PROT_READ, MAP_PRIVATE, ifd, 0);
-	if(!data) { code = FSLICE_EMAP; goto cleanup; }
+	if(data == (void*)(-1)) { code = FSLICE_EMAP; goto cleanup; }
 
 	// Extract the fits header, and the part of the data we need for our index calculations
-	char header[HEADER_NROW*HEADER_NCOL];
+	char header[HEADER_MAXBLOCKS*HEADER_NROW*HEADER_NCOL];
 	memcpy(header, data, sizeof header);
 	HeaderInfo info;
 	if(!parse_header(header, &info)) { code = FSLICE_EPARSE; goto cleanup; }
@@ -297,14 +312,15 @@ int slice_fits(int ifd, int ofd, char * sel, size_t * osize) {
 	}
 	fix_wcs(&oinfo);
 	update_header(header, &oinfo);
-	char oheader[HEADER_NROW*HEADER_NCOL];
-	prune_header(header, oheader, oinfo.naxes);
+	char oheader[HEADER_MAXBLOCKS*HEADER_NROW*HEADER_NCOL];
+	memset(oheader, ' ', sizeof(oheader));
+	oinfo.nblock = prune_header(header, oheader, info.nblock, oinfo.naxes);
 
 	WriteQueue queue = { ofd, 0 };
-	push_write(&queue, oheader, HEADER_NROW*HEADER_NCOL);
+	push_write(&queue, oheader, oinfo.nblock*HEADER_NROW*HEADER_NCOL);
 	// Allocate a zero vector that we will use for missing data
 	zeros = calloc(nx, nbyte);
-	void * img_start = data + HEADER_NROW*HEADER_NCOL;
+	void * img_start = data + info.nblock*HEADER_NROW*HEADER_NCOL;
 	if(!zeros) { code = FSLICE_EALLOC; goto cleanup; }
 	// any-dimensional loop over pre-axes. We will loop over only the
 	// valid values, so pre_inds is the offset from the slice starts slice.i1,

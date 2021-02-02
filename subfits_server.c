@@ -135,6 +135,12 @@ void send_header(int client_sd, int log_fd, char * addr_str, char * url, int cod
 	}
 }
 
+int fd_readable(int fd) {
+	char buf[1];
+	int r = read(fd, buf, 1);
+	return r == 1;
+}
+
 // This represents a server thread that will run forever until interrupted. It repeatedly
 // accepts connections, handles them, and then returns to accepting again.
 void * server_thread(void * arg) {
@@ -168,7 +174,7 @@ void * server_thread(void * arg) {
 		strncpy(orig_url, url, sizeof(orig_url));
 		// Split the url into the path and the query string
 		if((query = strchr(url, '?'))) *query++ = 0;
-		else query = url-1;
+		else query = 0;
 		//printf("method: %s, url: %s, query: %s, prot: %s\n", method, url, query, prot);
 		if(strcmp(method, "GET")) {
 			send_header(client_sd, log_fd, addr_str, orig_url, HTTP_405, "\r\nOnly GET is supported, but got '%s'", method);
@@ -182,9 +188,9 @@ void * server_thread(void * arg) {
 			goto cleanup;
 		}
 		// Try opening the file
-		if((fd = open(path, O_RDONLY)) < 0) {
+		if((fd = open(path, O_RDONLY)) < 0 || !fd_readable(fd)) {
 			send_header(client_sd, log_fd, addr_str, orig_url,
-					errno == ENOENT ? HTTP_404 : errno == EACCES ? HTTP_403 : HTTP_500, NULL);
+					(errno == ENOENT || errno == EISDIR) ? HTTP_404 : errno == EACCES ? HTTP_403 : HTTP_500, NULL);
 			goto cleanup;
 		}
 		// Test if the slice etc. make sense
